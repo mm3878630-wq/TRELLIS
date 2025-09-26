@@ -1,0 +1,217 @@
+# Blender Python script — creates a realistic 150ml bottle with label, transparent cap, gold nozzle,
+# and exports as GLB. Adjust IMAGE_PATH and EXPORT_PATH as needed.
+
+import bpy
+import math
+from mathutils import Vector, Euler
+
+# ---------- USER CONFIG ----------
+# Path to the label image (relative to Blender working directory) 
+IMAGE_PATH = "label.png"          # <- ضع هنا اسم ملف الصورة (أو المسار الكامل)
+EXPORT_PATH = "//delara_bottle.glb"  # // means current blend file directory; or use absolute path
+# Physical dimensions (meters) for ~150 ml cylinder
+BOTTLE_HEIGHT = 0.12  # 12 cm
+BOTTLE_RADIUS = 0.02  # 2 cm
+SEGMENTS = 64
+# ---------------------------------
+
+# utility: remove default objects
+bpy.ops.object.select_all(action='SELECT')
+bpy.ops.object.delete(use_global=False)
+
+# Set units to metric
+bpy.context.scene.unit_settings.system = 'METRIC'
+
+# Create cylinder (main body)
+bpy.ops.mesh.primitive_cylinder_add(vertices=SEGMENTS, radius=BOTTLE_RADIUS, depth=BOTTLE_HEIGHT, location=(0,0,BOTTLE_HEIGHT/2))
+bottle = bpy.context.object
+bottle.name = "Bottle_Body"
+
+# Add slight fillet: add bevel modifier for subtle edge rounding
+bpy.ops.object.modifier_add(type='BEVEL')
+bottle.modifiers["Bevel"].width = 0.0015
+bottle.modifiers["Bevel"].segments = 3
+bpy.ops.object.shade_smooth()
+
+# UV unwrap for label mapping (cylindrical projection)
+bpy.context.view_layer.objects.active = bottle
+bpy.ops.object.mode_set(mode='EDIT')
+bpy.ops.mesh.select_all(action='SELECT')
+bpy.ops.uv.cylinder_project(direction='VIEW_ON_EQUATOR', align='ALIGN_TO_OBJECT', scale_to_bounds=True)
+bpy.ops.object.mode_set(mode='OBJECT')
+
+# Create label material using image texture
+mat_label = bpy.data.materials.new(name="Label_Mat")
+mat_label.use_nodes = True
+nodes = mat_label.node_tree.nodes
+links = mat_label.node_tree.links
+nodes.clear()
+
+# Nodes
+tex_coord = nodes.new("ShaderNodeTexCoord")
+img_node = nodes.new("ShaderNodeTexImage")
+img_node.interpolation = 'Smart'
+try:
+    img_node.image = bpy.data.images.load(IMAGE_PATH)
+except:
+    img_node.image = None
+    print("Warning: couldn't load image. Check IMAGE_PATH:", IMAGE_PATH)
+
+principled = nodes.new("ShaderNodeBsdfPrincipled")
+output = nodes.new("ShaderNodeOutputMaterial")
+
+# If image has alpha, plug alpha to mix; otherwise assume full opacity.
+links.new(tex_coord.outputs['UV'], img_node.inputs['Vector'])
+links.new(img_node.outputs['Color'], principled.inputs['Base Color'])
+# Use image alpha if it exists
+links.new(img_node.outputs['Alpha'], principled.inputs['Alpha'])
+
+# Principled settings for printed sticker (slightly glossy)
+principled.inputs['Roughness'].default_value = 0.35
+principled.inputs['Sheen'].default_value = 0.1
+principled.inputs['Specular'].default_value = 0.4
+
+links.new(principled.outputs['BSDF'], output.inputs['Surface'])
+
+# Assign material to bottle (as second slot, keep base white beneath label)
+# Create a base white material
+mat_base = bpy.data.materials.new(name="Bottle_Base")
+mat_base.use_nodes = True
+nodes_base = mat_base.node_tree.nodes
+nodes_base["Principled BSDF"].inputs['Base Color'].default_value = (1,1,1,1)
+nodes_base["Principled BSDF"].inputs['Roughness'].default_value = 0.28
+
+bottle.data.materials.append(mat_base)
+bottle.data.materials.append(mat_label)
+# assign label to most of the side faces: we will use a simple approach: assign material index 1 to faces except top/bottom
+# Enter edit mode and set material indices by selecting top/bottom and assigning base
+bpy.ops.object.mode_set(mode='EDIT')
+import bmesh
+bm = bmesh.from_edit_mesh(bottle.data)
+bm.faces.ensure_lookup_table()
+# find top and bottom faces by average z
+top_faces = [f for f in bm.faces if all(v.co.z > (BOTTLE_HEIGHT*0.9 - BOTTLE_HEIGHT/2) for v in f.verts)]
+bottom_faces = [f for f in bm.faces if all(v.co.z < (BOTTLE_HEIGHT*0.1 - BOTTLE_HEIGHT/2) for v in f.verts)]
+# set index 0 by default then set side faces to 1
+for f in bm.faces:
+    f.material_index = 1  # label by default
+for f in top_faces + bottom_faces:
+    f.material_index = 0  # base
+bmesh.update_edit_mesh(bottle.data)
+bpy.ops.object.mode_set(mode='OBJECT')
+
+# Create cap (transparent plastic)
+cap_height = 0.035
+cap_radius = BOTTLE_RADIUS * 1.05
+bpy.ops.mesh.primitive_cylinder_add(vertices=SEGMENTS, radius=cap_radius, depth=cap_height, location=(0,0,BOTTLE_HEIGHT + cap_height/2 - 0.005))
+cap = bpy.context.object
+cap.name = "Cap"
+bpy.ops.object.shade_smooth()
+# cap material
+mat_cap = bpy.data.materials.new(name="Cap_Mat")
+mat_cap.use_nodes = True
+nodes = mat_cap.node_tree.nodes
+nodes["Principled BSDF"].inputs['Transmission'].default_value = 0.95
+nodes["Principled BSDF"].inputs['Roughness'].default_value = 0.06
+nodes["Principled BSDF"].inputs['IOR'].default_value = 1.48
+cap.data.materials.append(mat_cap)
+
+# Create nozzle (gold metallic)
+# nozzle base cylinder
+nozzle_radius = BOTTLE_RADIUS * 0.45
+nozzle_depth = 0.02
+bpy.ops.mesh.primitive_cylinder_add(vertices=32, radius=nozzle_radius, depth=nozzle_depth, location=(0,0,BOTTLE_HEIGHT + 0.01))
+nozzle = bpy.context.object
+# nozzle tip (small cylinder + small sphere/cap)
+bpy.ops.mesh.primitive_cone_add(vertices=32, radius1=nozzle_radius*0.8, radius2=0.0005, depth=0.01, location=(0,0,BOTTLE_HEIGHT + 0.01 + nozzle_depth/2))
+nozzle_tip = bpy.context.object
+
+# join nozzle parts
+bpy.ops.object.select_all(action='DESELECT')
+nozzle.select_set(True)
+nozzle_tip.select_set(True)
+bpy.context.view_layer.objects.active = nozzle
+bpy.ops.object.join()
+nozzle = bpy.context.object
+nozzle.name = "Nozzle"
+
+# gold material
+mat_gold = bpy.data.materials.new(name="Gold_Mat")
+mat_gold.use_nodes = True
+nodes = mat_gold.node_tree.nodes
+principled_gold = nodes.get("Principled BSDF")
+# gold-ish color
+principled_gold.inputs['Base Color'].default_value = (1.000, 0.766, 0.336, 1)
+principled_gold.inputs['Metallic'].default_value = 1.0
+principled_gold.inputs['Roughness'].default_value = 0.18
+principled_gold.inputs['Specular'].default_value = 0.8
+nozzle.data.materials.append(mat_gold)
+
+# Parent nozzle and cap to bottle for neat organization
+nozzle.parent = bottle
+cap.parent = bottle
+
+# Smooth shading
+for obj in (bottle, cap, nozzle):
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.shade_smooth()
+
+# Add a slight scale/position tweak so label sits nicely
+bottle.scale = (1,1,1)
+bottle.location = (0,0,0)
+
+# Scene lighting (3 area lights)
+def add_area(name, loc, size, power, rotation=(0,0,0)):
+    bpy.ops.object.light_add(type='AREA', location=loc, rotation=rotation)
+    l = bpy.context.object
+    l.name = name
+    l.data.size = size
+    l.data.energy = power
+    return l
+
+add_area("KeyLight", (0.4, -0.6, 0.5), 0.5, 1200, rotation=(math.radians(60),0,math.radians(40)))
+add_area("FillLight", (-0.4, -0.3, 0.4), 0.6, 300, rotation=(math.radians(60),0,math.radians(-40)))
+add_area("BackLight", (0, 0.8, 0.6), 0.8, 200, rotation=(math.radians(110),0,0))
+
+# Camera
+bpy.ops.object.camera_add(location=(0.18, -0.35, 0.12), rotation=(math.radians(75), 0, math.radians(25)))
+cam = bpy.context.object
+bpy.context.scene.camera = cam
+cam.data.lens = 50
+
+# Set render engine to Cycles for realistic preview (GLB export uses principled nodes which are compatible)
+bpy.context.scene.render.engine = 'CYCLES'
+# For faster, lower-sample preview you can reduce:
+bpy.context.scene.cycles.samples = 128
+
+# Optional: add environment HDRI — skipped (can't load external HDRI here)
+# Instead set subtle world lighting
+world = bpy.context.scene.world
+world.use_nodes = True
+w_nodes = world.node_tree.nodes
+w_links = world.node_tree.links
+bg = w_nodes.get("Background")
+bg.inputs['Strength'].default_value = 0.9
+
+# Tidy: select all and apply scale & transforms
+for obj in (bottle, cap, nozzle):
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+
+# Export to GLB (glTF binary)
+# Ensure image is packed or exported relative — we'll pack the image into the blend before export to ensure texture present
+if img_node.image:
+    bpy.ops.image.save_all_modified()  # save if loaded
+    img_node.image.pack()
+else:
+    print("Image not set — GLB will have no label texture. Check IMAGE_PATH.")
+
+# Export
+bpy.ops.export_scene.gltf(filepath=EXPORT_PATH, export_format='GLB',
+                          export_materials='EXPORT',
+                          export_selected=False,
+                          export_texcoords=True,
+                          export_normals=True,
+                          export_material_image_resources='AUTO')
+
+print("Exported GLB to:", EXPORT_PATH)
